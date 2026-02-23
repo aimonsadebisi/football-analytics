@@ -109,10 +109,10 @@ with st.sidebar:
     limit_mid = st.slider("Orta Saha", 1, 30, 20)
     limit_fwd = st.slider("Forvet", 1, 20, 15)
     st.subheader("⏱️ Minimum Dakika")
-    min_gk = st.number_input("Kaleci", value=900, step=100)
-    min_def = st.number_input("Defans", value=900, step=100)
-    min_mid = st.number_input("Orta Saha", value=900, step=100)
-    min_fwd = st.number_input("Forvet", value=600, step=100)
+    min_gk = st.number_input("Kaleci min. dakika", value=900, step=100)
+    min_def = st.number_input("Defans min. dakika", value=900, step=100)
+    min_mid = st.number_input("Orta Saha min. dakika", value=900, step=100)
+    min_fwd = st.number_input("Forvet min. dakika", value=600, step=100)
     run = st.button("🚀 Analizi Başlat", use_container_width=True)
 
 if run:
@@ -123,17 +123,17 @@ if run:
     data, total_matches = fetch_data(tournament_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), min_minutes, progress_bar, status_text)
     progress_bar.empty()
     status_text.empty()
-    st.success(f"✅ {total_matches} maç incelendi, {len(data)} oyuncu listelendi.")
-    df = pd.DataFrame(data)
-    tabs = st.tabs(["🥅 Kaleciler", "🛡️ Defans", "⚙️ Orta Saha", "⚡ Forvet"])
-    for (grp, limit, tab) in [("GK", limit_gk, tabs[0]), ("DEF", limit_def, tabs[1]), ("MID", limit_mid, tabs[2]), ("FWD", limit_fwd, tabs[3])]:
-        with tab:
-            if df.empty or "Grup" not in df.columns:
-    st.warning("Veri bulunamadı.")
-    continue
-filtered = df[df["Grup"] == grp].head(limit).reset_index(drop=True)
-            filtered.index += 1
-            st.dataframe(filtered.drop(columns=["Grup"]), use_container_width=True)
-            st.download_button(f"📥 CSV İndir", filtered.to_csv(index=False).encode("utf-8"), f"{league_name}_{grp}.csv", "text/csv")
+    if not data:
+        st.error("Veri bulunamadı. Tarih aralığını veya lig seçimini kontrol et.")
+    else:
+        st.success(f"✅ {total_matches} maç incelendi, {len(data)} oyuncu listelendi.")
+        df = pd.DataFrame(data)
+        tabs = st.tabs(["🥅 Kaleciler", "🛡️ Defans", "⚙️ Orta Saha", "⚡ Forvet"])
+        for (grp, limit, tab) in [("GK", limit_gk, tabs[0]), ("DEF", limit_def, tabs[1]), ("MID", limit_mid, tabs[2]), ("FWD", limit_fwd, tabs[3])]:
+            with tab:
+                filtered = df[df["Grup"] == grp].head(limit).reset_index(drop=True)
+                filtered.index += 1
+                st.dataframe(filtered.drop(columns=["Grup"]), use_container_width=True)
+                st.download_button(f"📥 CSV İndir", filtered.to_csv(index=False).encode("utf-8"), f"{league_name}_{grp}.csv", "text/csv")
 else:
     st.markdown("👈 **Sol panelden ayarları yap ve 'Analizi Başlat' butonuna bas.**")
