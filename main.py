@@ -3,7 +3,14 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+    "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com",
+    "Cache-Control": "no-cache",
+}
 
 LIGLER = {
     "Süper Lig": 52,
@@ -40,7 +47,10 @@ def fetch_data(tournament_id, start_date, end_date, min_minutes, progress_bar, s
         progress_bar.progress((i + 1) / len(dates))
         status_text.text(f"Tarih taranıyor: {date}")
         try:
-            r = requests.get(f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{date}", headers=HEADERS, timeout=20)
+            r = requests.get(
+                f"https://api.sofascore.com/api/v1/sport/football/scheduled-events/{date}",
+                headers=HEADERS, timeout=20
+            )
         except:
             continue
         if r.status_code != 200:
@@ -53,7 +63,10 @@ def fetch_data(tournament_id, start_date, end_date, min_minutes, progress_bar, s
                 continue
             total_matches += 1
             try:
-                lr = requests.get(f"https://api.sofascore.com/api/v1/event/{match_id}/lineups", headers=HEADERS, timeout=20)
+                lr = requests.get(
+                    f"https://api.sofascore.com/api/v1/event/{match_id}/lineups",
+                    headers=HEADERS, timeout=20
+                )
             except:
                 continue
             if lr.status_code != 200:
@@ -89,7 +102,15 @@ def fetch_data(tournament_id, start_date, end_date, min_minutes, progress_bar, s
         if rec["minutes"] < min_minutes.get(grp, 0):
             continue
         avg = sum(rec["ratings"]) / len(rec["ratings"])
-        final.append({"Oyuncu": name, "Takım": rec["team"], "Mevki": rec["pos"], "Grup": grp, "Ort. Rating": round(avg, 2), "Dakika": rec["minutes"], "Maç": len(rec["match_ids"])})
+        final.append({
+            "Oyuncu": name,
+            "Takım": rec["team"],
+            "Mevki": rec["pos"],
+            "Grup": grp,
+            "Ort. Rating": round(avg, 2),
+            "Dakika": rec["minutes"],
+            "Maç": len(rec["match_ids"])
+        })
     final.sort(key=lambda x: x["Ort. Rating"], reverse=True)
     return final, total_matches
 
@@ -120,7 +141,14 @@ if run:
     progress_bar = st.progress(0)
     status_text = st.empty()
     min_minutes = {"GK": min_gk, "DEF": min_def, "MID": min_mid, "FWD": min_fwd}
-    data, total_matches = fetch_data(tournament_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), min_minutes, progress_bar, status_text)
+    data, total_matches = fetch_data(
+        tournament_id,
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d"),
+        min_minutes,
+        progress_bar,
+        status_text
+    )
     progress_bar.empty()
     status_text.empty()
     if not data:
@@ -129,11 +157,21 @@ if run:
         st.success(f"✅ {total_matches} maç incelendi, {len(data)} oyuncu listelendi.")
         df = pd.DataFrame(data)
         tabs = st.tabs(["🥅 Kaleciler", "🛡️ Defans", "⚙️ Orta Saha", "⚡ Forvet"])
-        for (grp, limit, tab) in [("GK", limit_gk, tabs[0]), ("DEF", limit_def, tabs[1]), ("MID", limit_mid, tabs[2]), ("FWD", limit_fwd, tabs[3])]:
+        for (grp, limit, tab) in [
+            ("GK", limit_gk, tabs[0]),
+            ("DEF", limit_def, tabs[1]),
+            ("MID", limit_mid, tabs[2]),
+            ("FWD", limit_fwd, tabs[3])
+        ]:
             with tab:
                 filtered = df[df["Grup"] == grp].head(limit).reset_index(drop=True)
                 filtered.index += 1
                 st.dataframe(filtered.drop(columns=["Grup"]), use_container_width=True)
-                st.download_button(f"📥 CSV İndir", filtered.to_csv(index=False).encode("utf-8"), f"{league_name}_{grp}.csv", "text/csv")
+                st.download_button(
+                    f"📥 CSV İndir ({grp})",
+                    filtered.to_csv(index=False).encode("utf-8"),
+                    f"{league_name}_{grp}.csv",
+                    "text/csv"
+                )
 else:
     st.markdown("👈 **Sol panelden ayarları yap ve 'Analizi Başlat' butonuna bas.**")
