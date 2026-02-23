@@ -128,7 +128,10 @@ if run:
     tabs = st.tabs(["🥅 Kaleciler", "🛡️ Defans", "⚙️ Orta Saha", "⚡ Forvet"])
     for (grp, limit, tab) in [("GK", limit_gk, tabs[0]), ("DEF", limit_def, tabs[1]), ("MID", limit_mid, tabs[2]), ("FWD", limit_fwd, tabs[3])]:
         with tab:
-            filtered = df[df["Grup"] == grp].head(limit).reset_index(drop=True)
+            if df.empty or "Grup" not in df.columns:
+    st.warning("Veri bulunamadı.")
+    continue
+filtered = df[df["Grup"] == grp].head(limit).reset_index(drop=True)
             filtered.index += 1
             st.dataframe(filtered.drop(columns=["Grup"]), use_container_width=True)
             st.download_button(f"📥 CSV İndir", filtered.to_csv(index=False).encode("utf-8"), f"{league_name}_{grp}.csv", "text/csv")
