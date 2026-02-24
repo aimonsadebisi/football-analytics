@@ -5,6 +5,11 @@ from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    import cloudscraper
+except ImportError:  # optional dependency
+    cloudscraper = None
+
 # =====================================================
 # HEADERS
 # =====================================================
@@ -22,10 +27,6 @@ HEADERS = {
     "Origin": "https://www.sofascore.com",
 }
 
-# =====================================================
-# LEAGUES
-# =====================================================
-
 LEAGUES = {
     "Süper Lig": {"ids": [52], "slugs": ["super-lig"]},
     "Premier League": {"ids": [17], "slugs": ["premier-league"]},
@@ -42,10 +43,6 @@ SCHEDULE_ENDPOINTS = [
     "https://www.sofascore.com/api/v1/sport/football/events/{date}",
 ]
 
-
-# =====================================================
-# HELPERS
-# =====================================================
 
 def daterange(start, end):
     d1 = datetime.strptime(start, "%Y-%m-%d")
@@ -67,15 +64,14 @@ def group_pos(pos):
 
 
 @st.cache_resource
-def get_http_session(use_env_proxy):
+def get_requests_session(use_env_proxy):
     session = requests.Session()
     session.trust_env = use_env_proxy
-
     retry = Retry(
         total=3,
         connect=3,
         read=3,
-        backoff_factor=0.5,
+        backoff_factor=0.4,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
     )
@@ -86,64 +82,84 @@ def get_http_session(use_env_proxy):
     return session
 
 
-def warmup_session(session):
-    """SofaScore ana sayfasını çağırıp cookie almayı dener."""
-    try:
-        session.get("https://www.sofascore.com/", timeout=12)
-    except requests.RequestException:
-        pass
+@st.cache_resource
+def get_cloudscraper_session(use_env_proxy):
+    if cloudscraper is None:
+        return None
+
+    scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+    scraper.headers.update(HEADERS)
+    scraper.trust_env = use_env_proxy
+    return scraper
 
 
-def fetch_json(url, timeout=20, connection_mode="auto"):
+def fetch_json(url, timeout=20, connection_mode="auto", client_mode="auto"):
     """
-    connection_mode:
-      - auto: direct -> proxy
-      - direct: only direct
-      - proxy: only proxy/env
+    client_mode:
+      - requests: only requests
+      - cloudscraper: only cloudscraper
+      - auto: requests first, then cloudscraper
     """
-    direct_session = get_http_session(False)
-    proxy_session = get_http_session(True)
-
     if connection_mode == "direct":
-        sessions = [(direct_session, "direct")]
+        proxy_modes = [False]
     elif connection_mode == "proxy":
-        sessions = [(proxy_session, "proxy")]
+        proxy_modes = [True]
     else:
-        sessions = [(direct_session, "direct"), (proxy_session, "proxy")]
+        proxy_modes = [False, True]
+
+    transport_modes = []
+    if client_mode == "requests":
+        transport_modes = ["requests"]
+    elif client_mode == "cloudscraper":
+        transport_modes = ["cloudscraper"]
+    else:
+        transport_modes = ["requests", "cloudscraper"]
 
     errors = []
 
-    for session, mode in sessions:
-        warmup_session(session)
-        try:
-            response = session.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response.json(), None
-        except ValueError:
-            errors.append(f"{mode}: API JSON döndürmedi")
-        except requests.RequestException as exc:
-            errors.append(f"{mode}: {exc}")
+    for transport in transport_modes:
+        for use_proxy in proxy_modes:
+            mode_label = f"{transport}-{'proxy' if use_proxy else 'direct'}"
+            try:
+                if transport == "cloudscraper":
+                    session = get_cloudscraper_session(use_proxy)
+                    if session is None:
+                        errors.append(f"{mode_label}: cloudscraper kurulu değil")
+                        continue
+                else:
+                    session = get_requests_session(use_proxy)
+
+                # warmup to get cookies
+                try:
+                    session.get("https://www.sofascore.com/", timeout=10)
+                except requests.RequestException:
+                    pass
+
+                response = session.get(url, timeout=timeout)
+                response.raise_for_status()
+                return response.json(), None
+            except ValueError:
+                errors.append(f"{mode_label}: API JSON döndürmedi")
+            except requests.RequestException as exc:
+                errors.append(f"{mode_label}: {exc}")
 
     return None, " || ".join(errors)
 
 
 def is_target_league(ev, selected_league):
     unique = ev.get("tournament", {}).get("uniqueTournament", {})
-    t_id = unique.get("id")
-    t_slug = str(unique.get("slug", "")).lower()
-    return (t_id in selected_league["ids"]) or (t_slug in selected_league["slugs"])
+    return (unique.get("id") in selected_league["ids"]) or (str(unique.get("slug", "")).lower() in selected_league["slugs"])
 
 
 def is_played_match(ev):
-    status = str(ev.get("status", {}).get("type", "")).lower()
-    return status in {"finished", "inprogress"}
+    return str(ev.get("status", {}).get("type", "")).lower() in {"finished", "inprogress"}
 
 
-def fetch_schedule_for_date(date, connection_mode):
+def fetch_schedule_for_date(date, connection_mode, client_mode):
     errors = []
     for endpoint in SCHEDULE_ENDPOINTS:
         url = endpoint.format(date=date)
-        data, err = fetch_json(url, connection_mode=connection_mode)
+        data, err = fetch_json(url, connection_mode=connection_mode, client_mode=client_mode)
         if err:
             errors.append(f"{url} -> {err}")
             continue
@@ -157,19 +173,13 @@ def fetch_schedule_for_date(date, connection_mode):
     return [], " | ".join(errors)
 
 
-def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mode):
+def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mode, client_mode):
     players = {}
     errors = []
 
     def ensure(name):
         if name not in players:
-            players[name] = {
-                "team": "",
-                "pos": "",
-                "ratings": [],
-                "minutes": 0,
-                "match_ids": set(),
-            }
+            players[name] = {"team": "", "pos": "", "ratings": [], "minutes": 0, "match_ids": set()}
         return players[name]
 
     total_matches = 0
@@ -188,17 +198,15 @@ def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mo
         progress.progress((i + 1) / len(dates))
         status.text(f"Taranıyor: {date}")
 
-        events, schedule_err = fetch_schedule_for_date(date, connection_mode)
+        events, schedule_err = fetch_schedule_for_date(date, connection_mode, client_mode)
         if schedule_err and not events:
             errors.append(f"{date} programı alınamadı: {schedule_err}")
             continue
 
         for ev in events:
             scanned_events += 1
-
             if not is_target_league(ev, selected_league):
                 continue
-
             league_events += 1
 
             if not is_played_match(ev):
@@ -207,20 +215,21 @@ def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mo
             match_id = ev.get("id")
             if not match_id:
                 continue
-
             total_matches += 1
 
-            lineup_data, lineup_err = fetch_json(
+            lineup_urls = [
                 f"https://api.sofascore.com/api/v1/event/{match_id}/lineups",
-                connection_mode=connection_mode,
-            )
-            if lineup_err:
-                lineup_data, lineup_err = fetch_json(
-                    f"https://www.sofascore.com/api/v1/event/{match_id}/lineups",
-                    connection_mode=connection_mode,
-                )
+                f"https://www.sofascore.com/api/v1/event/{match_id}/lineups",
+            ]
 
-            if lineup_err or not isinstance(lineup_data, dict):
+            lineup_data = None
+            lineup_err = None
+            for lurl in lineup_urls:
+                lineup_data, lineup_err = fetch_json(lurl, connection_mode=connection_mode, client_mode=client_mode)
+                if isinstance(lineup_data, dict):
+                    break
+
+            if not isinstance(lineup_data, dict):
                 errors.append(f"{match_id} lineups alınamadı: {lineup_err}")
                 continue
 
@@ -228,7 +237,6 @@ def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mo
 
             for side in ("home", "away"):
                 team = ev.get("homeTeam", {}).get("name", "") if side == "home" else ev.get("awayTeam", {}).get("name", "")
-
                 for pl in lineup_data.get(side, {}).get("players", []):
                     name = pl.get("player", {}).get("name")
                     if not name:
@@ -264,13 +272,10 @@ def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mo
     final = []
     for name, rec in players.items():
         grp = group_pos(rec["pos"])
-
         if rec["minutes"] < min_minutes.get(grp, 0):
             continue
         if not rec["ratings"]:
             continue
-
-        avg = sum(rec["ratings"]) / len(rec["ratings"])
 
         final.append(
             {
@@ -278,7 +283,7 @@ def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mo
                 "Takım": rec["team"],
                 "Pozisyon": rec["pos"],
                 "Grup": grp,
-                "Rating": round(avg, 2),
+                "Rating": round(sum(rec["ratings"]) / len(rec["ratings"]), 2),
                 "Dakika": rec["minutes"],
                 "Maç": len(rec["match_ids"]),
             }
@@ -300,9 +305,15 @@ with st.sidebar:
     selected_league = LEAGUES[league_name]
 
     connection_mode = st.selectbox(
-        "Bağlantı modu",
+        "Ağ modu",
         ["auto", "direct", "proxy"],
-        help="403 alıyorsan direct deneyin. Kurumsal ağdaysan proxy gerekebilir.",
+        help="Direct proxy'siz dener. Proxy kurumsal ağlar için.",
+    )
+
+    client_mode = st.selectbox(
+        "HTTP istemcisi",
+        ["auto", "requests", "cloudscraper"],
+        help="403 alıyorsanız cloudscraper deneyin (Cloudflare bypass).",
     )
 
     today = datetime.today().date()
@@ -311,10 +322,10 @@ with st.sidebar:
 
     st.subheader("Minimum Dakika")
     min_minutes = {
-        "GK": st.number_input("GK", min_value=0, value=120, step=30),
-        "DEF": st.number_input("DEF", min_value=0, value=120, step=30),
-        "MID": st.number_input("MID", min_value=0, value=120, step=30),
-        "FWD": st.number_input("FWD", min_value=0, value=90, step=30),
+        "GK": st.number_input("GK", min_value=0, value=90, step=30),
+        "DEF": st.number_input("DEF", min_value=0, value=90, step=30),
+        "MID": st.number_input("MID", min_value=0, value=90, step=30),
+        "FWD": st.number_input("FWD", min_value=0, value=60, step=30),
     }
 
     run = st.button("🚀 Analizi Başlat", use_container_width=True)
@@ -330,10 +341,11 @@ if run:
         end.strftime("%Y-%m-%d"),
         min_minutes,
         connection_mode,
+        client_mode,
     )
 
     st.caption(
-        f"Bağlantı: {connection_mode} | Taranan event: {scanned_events} | "
+        f"Ağ: {connection_mode} | İstemci: {client_mode} | Taranan: {scanned_events} | "
         f"Lig eşleşen: {league_events} | Lineup alınan: {lineup_success}"
     )
 
@@ -346,8 +358,7 @@ if run:
 
     if df.empty:
         st.error(
-            "Veri bulunamadı. 403 görüyorsan bağlantı modunu 'direct' yapıp tekrar deneyin. "
-            "Kurumsal proxy kullanıyorsanız 'proxy' modunu deneyin."
+            "Veri bulunamadı. 403 devam ediyorsa HTTP istemcisini 'cloudscraper' yapın ve tekrar deneyin."
         )
     else:
         st.success(f"{matches} maç incelendi")
