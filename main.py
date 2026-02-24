@@ -10,15 +10,20 @@ from urllib3.util.retry import Retry
 # =====================================================
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     "Referer": "https://www.sofascore.com/",
     "Origin": "https://www.sofascore.com",
 }
 
 # =====================================================
 # LEAGUES
-# id values are uniqueTournament ids from SofaScore
 # =====================================================
 
 LEAGUES = {
@@ -30,7 +35,6 @@ LEAGUES = {
     "Ligue 1": {"ids": [34], "slugs": ["ligue-1"]},
 }
 
-# API endpoint fallback order
 SCHEDULE_ENDPOINTS = [
     "https://api.sofascore.com/api/v1/sport/football/scheduled-events/{date}",
     "https://www.sofascore.com/api/v1/sport/football/scheduled-events/{date}",
@@ -38,6 +42,10 @@ SCHEDULE_ENDPOINTS = [
     "https://www.sofascore.com/api/v1/sport/football/events/{date}",
 ]
 
+
+# =====================================================
+# HELPERS
+# =====================================================
 
 def daterange(start, end):
     d1 = datetime.strptime(start, "%Y-%m-%d")
@@ -78,48 +86,64 @@ def get_http_session(use_env_proxy):
     return session
 
 
-def fetch_json(url, timeout=20):
-    """Try direct first, then env-proxy session as fallback."""
-    sessions = [
-        (get_http_session(False), "direct"),
-        (get_http_session(True), "proxy"),
-    ]
+def warmup_session(session):
+    """SofaScore ana sayfasını çağırıp cookie almayı dener."""
+    try:
+        session.get("https://www.sofascore.com/", timeout=12)
+    except requests.RequestException:
+        pass
 
-    last_err = None
+
+def fetch_json(url, timeout=20, connection_mode="auto"):
+    """
+    connection_mode:
+      - auto: direct -> proxy
+      - direct: only direct
+      - proxy: only proxy/env
+    """
+    direct_session = get_http_session(False)
+    proxy_session = get_http_session(True)
+
+    if connection_mode == "direct":
+        sessions = [(direct_session, "direct")]
+    elif connection_mode == "proxy":
+        sessions = [(proxy_session, "proxy")]
+    else:
+        sessions = [(direct_session, "direct"), (proxy_session, "proxy")]
+
+    errors = []
+
     for session, mode in sessions:
+        warmup_session(session)
         try:
             response = session.get(url, timeout=timeout)
             response.raise_for_status()
             return response.json(), None
         except ValueError:
-            last_err = f"{mode}: API JSON döndürmedi"
+            errors.append(f"{mode}: API JSON döndürmedi")
         except requests.RequestException as exc:
-            last_err = f"{mode}: {exc}"
+            errors.append(f"{mode}: {exc}")
 
-    return None, last_err
+    return None, " || ".join(errors)
 
 
 def is_target_league(ev, selected_league):
-    tournament = ev.get("tournament", {})
-    unique = tournament.get("uniqueTournament", {})
-
+    unique = ev.get("tournament", {}).get("uniqueTournament", {})
     t_id = unique.get("id")
     t_slug = str(unique.get("slug", "")).lower()
-
     return (t_id in selected_league["ids"]) or (t_slug in selected_league["slugs"])
 
 
 def is_played_match(ev):
-    # SofaScore status examples: finished, inprogress, notstarted, postponed
     status = str(ev.get("status", {}).get("type", "")).lower()
     return status in {"finished", "inprogress"}
 
 
-def fetch_schedule_for_date(date):
+def fetch_schedule_for_date(date, connection_mode):
     errors = []
     for endpoint in SCHEDULE_ENDPOINTS:
         url = endpoint.format(date=date)
-        data, err = fetch_json(url)
+        data, err = fetch_json(url, connection_mode=connection_mode)
         if err:
             errors.append(f"{url} -> {err}")
             continue
@@ -128,13 +152,12 @@ def fetch_schedule_for_date(date):
         if events:
             return events, None
 
-        # endpoint worked but returned empty; keep as potential info
         errors.append(f"{url} -> 0 event")
 
     return [], " | ".join(errors)
 
 
-def fetch_data(selected_league, start_date, end_date, min_minutes):
+def fetch_data(selected_league, start_date, end_date, min_minutes, connection_mode):
     players = {}
     errors = []
 
@@ -165,7 +188,7 @@ def fetch_data(selected_league, start_date, end_date, min_minutes):
         progress.progress((i + 1) / len(dates))
         status.text(f"Taranıyor: {date}")
 
-        events, schedule_err = fetch_schedule_for_date(date)
+        events, schedule_err = fetch_schedule_for_date(date, connection_mode)
         if schedule_err and not events:
             errors.append(f"{date} programı alınamadı: {schedule_err}")
             continue
@@ -179,7 +202,6 @@ def fetch_data(selected_league, start_date, end_date, min_minutes):
             league_events += 1
 
             if not is_played_match(ev):
-                # Not-started matches have no ratings/lineups yet.
                 continue
 
             match_id = ev.get("id")
@@ -189,12 +211,13 @@ def fetch_data(selected_league, start_date, end_date, min_minutes):
             total_matches += 1
 
             lineup_data, lineup_err = fetch_json(
-                f"https://api.sofascore.com/api/v1/event/{match_id}/lineups"
+                f"https://api.sofascore.com/api/v1/event/{match_id}/lineups",
+                connection_mode=connection_mode,
             )
             if lineup_err:
-                # lineups endpoint on www as fallback
                 lineup_data, lineup_err = fetch_json(
-                    f"https://www.sofascore.com/api/v1/event/{match_id}/lineups"
+                    f"https://www.sofascore.com/api/v1/event/{match_id}/lineups",
+                    connection_mode=connection_mode,
                 )
 
             if lineup_err or not isinstance(lineup_data, dict):
@@ -262,7 +285,6 @@ def fetch_data(selected_league, start_date, end_date, min_minutes):
         )
 
     final.sort(key=lambda x: x["Rating"], reverse=True)
-
     return pd.DataFrame(final), total_matches, scanned_events, errors, league_events, lineup_success
 
 
@@ -277,17 +299,22 @@ with st.sidebar:
     league_name = st.selectbox("Lig", list(LEAGUES.keys()))
     selected_league = LEAGUES[league_name]
 
+    connection_mode = st.selectbox(
+        "Bağlantı modu",
+        ["auto", "direct", "proxy"],
+        help="403 alıyorsan direct deneyin. Kurumsal ağdaysan proxy gerekebilir.",
+    )
+
     today = datetime.today().date()
     start = st.date_input("Başlangıç", today - timedelta(days=14))
     end = st.date_input("Bitiş", today)
 
     st.subheader("Minimum Dakika")
-
     min_minutes = {
-        "GK": st.number_input("GK", min_value=0, value=180, step=30),
-        "DEF": st.number_input("DEF", min_value=0, value=180, step=30),
-        "MID": st.number_input("MID", min_value=0, value=180, step=30),
-        "FWD": st.number_input("FWD", min_value=0, value=150, step=30),
+        "GK": st.number_input("GK", min_value=0, value=120, step=30),
+        "DEF": st.number_input("DEF", min_value=0, value=120, step=30),
+        "MID": st.number_input("MID", min_value=0, value=120, step=30),
+        "FWD": st.number_input("FWD", min_value=0, value=90, step=30),
     }
 
     run = st.button("🚀 Analizi Başlat", use_container_width=True)
@@ -302,10 +329,12 @@ if run:
         start.strftime("%Y-%m-%d"),
         end.strftime("%Y-%m-%d"),
         min_minutes,
+        connection_mode,
     )
 
     st.caption(
-        f"Taranan event: {scanned_events} | Lig eşleşen: {league_events} | Lineup alınan: {lineup_success}"
+        f"Bağlantı: {connection_mode} | Taranan event: {scanned_events} | "
+        f"Lig eşleşen: {league_events} | Lineup alınan: {lineup_success}"
     )
 
     if errors:
@@ -317,12 +346,11 @@ if run:
 
     if df.empty:
         st.error(
-            "Veri bulunamadı. Olası sebepler: (1) tarih aralığında oynanmış maç yok, "
-            "(2) API erişimi engelli, (3) dakika filtresi yüksek."
+            "Veri bulunamadı. 403 görüyorsan bağlantı modunu 'direct' yapıp tekrar deneyin. "
+            "Kurumsal proxy kullanıyorsanız 'proxy' modunu deneyin."
         )
     else:
         st.success(f"{matches} maç incelendi")
-
         tabs = st.tabs(["GK", "DEF", "MID", "FWD"])
         for grp, tab in zip(["GK", "DEF", "MID", "FWD"], tabs):
             with tab:
